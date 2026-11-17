@@ -1,5 +1,6 @@
 
 from pathlib import Path
+
 from google.transit import gtfs_realtime_pb2
 
 data = Path("data/raw/sample_trip_updates.pb").read_bytes()

@@ -1,5 +1,6 @@
-import pandas as pd
 from pathlib import Path
+
+import pandas as pd
 from google.transit import gtfs_realtime_pb2
 
 d = Path("data/static_gtfs/latest")

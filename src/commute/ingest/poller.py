@@ -1,4 +1,7 @@
-import json, os, sys, time
+import json
+import os
+import sys
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -10,13 +13,30 @@ from dotenv import load_dotenv
 from google.transit import gtfs_realtime_pb2
 
 URL = "https://api.nationaltransport.ie/gtfsr/v2/TripUpdates"
-HEADER = "x-api-key"                      # same header as scripts/explore_fetch.py
+HEADER = "x-api-key"  # same header name as scripts/explore_fetch.py
 RAW_DIR = Path("data/raw/trip_updates")
 LOG_FILE = Path("data/raw/poll_log.jsonl")
 STATIC_DIR = Path("data/static_gtfs/latest")
 DUBLIN_BUS_AGENCY = "1"
-MAX_STOPS = 3        # keeping only the next 3 stops per trip, to limit storage
-INTERVAL = 60        # seconds between polls
+MAX_STOPS = 3  # keep only the next 3 stops per trip, to limit storage
+INTERVAL = 60  # seconds between polls
+
+# Explicit schema: every file has identical column types, even if a column is all-null.
+SCHEMA = pa.schema(
+    [
+        ("fetched_at", pa.timestamp("us", tz="UTC")),
+        ("feed_timestamp", pa.int64()),
+        ("trip_id", pa.string()),
+        ("route_id", pa.string()),
+        ("direction_id", pa.int64()),
+        ("start_date", pa.string()),
+        ("start_time", pa.string()),
+        ("stop_sequence", pa.int64()),
+        ("stop_id", pa.string()),
+        ("arrival_delay", pa.int64()),
+        ("departure_delay", pa.int64()),
+    ]
+)
 
 
 def load_route_ids():
@@ -24,94 +44,66 @@ def load_route_ids():
     return set(routes.loc[routes.agency_id == DUBLIN_BUS_AGENCY, "route_id"])
 
 
-
 def parse(payload, fetched_at, route_ids):
     feed = gtfs_realtime_pb2.FeedMessage()
     feed.ParseFromString(payload)
-
     rows = []
-
     for e in feed.entity:
         if not e.HasField("trip_update"):
             continue
-
         tu = e.trip_update
-
-        if tu.trip.route_id not in route_ids:
+        trip = tu.trip
+        if trip.route_id not in route_ids:
             continue
-
-        # Common trip-level fields
-        trip_fields = {
+        base = {
             "fetched_at": fetched_at,
             "feed_timestamp": feed.header.timestamp,
-            "trip_id": tu.trip.trip_id,
-            "route_id": tu.trip.route_id,
-            "direction_id": tu.trip.direction_id if tu.trip.HasField("direction_id") else None,
-            "start_date": tu.trip.start_date,
-            "start_time": tu.trip.start_time,
+            "trip_id": trip.trip_id,
+            "route_id": trip.route_id,
+            "direction_id": trip.direction_id if trip.HasField("direction_id") else None,
+            "start_date": trip.start_date,
+            "start_time": trip.start_time,
         }
-
-        # Keep trips even when they have no stop-time updates
-        if len(tu.stop_time_update) == 0:
-            rows.append({
-                **trip_fields,
-                "stop_sequence": None,
-                "stop_id": None,
-                "arrival_delay": None,
-                "departure_delay": None,
-            })
+        stops = list(tu.stop_time_update)[:MAX_STOPS]
+        if not stops:
+            # keep trips with no stop updates (e.g. cancelled) as one row
+            rows.append(
+                {**base, "stop_sequence": None, "stop_id": None,
+                 "arrival_delay": None, "departure_delay": None}
+            )
             continue
-
-        # Keep only the first MAX_STOPS updates
-        for stu in tu.stop_time_update[:MAX_STOPS]:
-
-            arrival_delay = (
-                stu.arrival.delay
-                if stu.HasField("arrival") and stu.arrival.HasField("delay")
-                else None
+        for stu in stops:
+            rows.append(
+                {
+                    **base,
+                    "stop_sequence": (
+                        stu.stop_sequence if stu.HasField("stop_sequence") else None
+                    ),
+                    "stop_id": stu.stop_id or None,
+                    "arrival_delay": (
+                        stu.arrival.delay
+                        if stu.HasField("arrival") and stu.arrival.HasField("delay")
+                        else None
+                    ),
+                    "departure_delay": (
+                        stu.departure.delay
+                        if stu.HasField("departure") and stu.departure.HasField("delay")
+                        else None
+                    ),
+                }
             )
-
-            departure_delay = (
-                stu.departure.delay
-                if stu.HasField("departure") and stu.departure.HasField("delay")
-                else None
-            )
-
-            rows.append({
-                **trip_fields,
-                "stop_sequence": stu.stop_sequence if stu.HasField("stop_sequence") else None,
-                "stop_id": stu.stop_id,
-                "arrival_delay": arrival_delay,
-                "departure_delay": departure_delay,
-            })
-
     return rows
 
 
-
 def write_snapshot(rows, fetched_at):
-
-    folder = (
-        RAW_DIR
-        / f"date={fetched_at:%Y-%m-%d}"
-        / f"hour={fetched_at:%H}"
-    )
-
+    if not rows:
+        return None
+    folder = RAW_DIR / f"date={fetched_at:%Y-%m-%d}" / f"hour={fetched_at:%H}"
     folder.mkdir(parents=True, exist_ok=True)
-
-    file = f"{fetched_at:%Y%m%dT%H%M%S}.parquet"
-
-    final = folder / file
-    tmp = Path(str(final) + ".tmp")
-
-    pq.write_table(
-        pa.Table.from_pylist(rows),
-        tmp,
-        compression="zstd"
-    )
-
-    os.replace(tmp, final)
-
+    final = folder / f"{fetched_at:%Y%m%dT%H%M%S}.parquet"
+    tmp = final.with_suffix(".parquet.tmp")
+    pq.write_table(pa.Table.from_pylist(rows, schema=SCHEMA), tmp, compression="zstd")
+    os.replace(tmp, final)  # atomic: a crash never leaves a half-written file
     return final
 
 
@@ -124,7 +116,7 @@ def poll_once(api_key, route_ids):
         rows = parse(r.content, fetched_at, route_ids)
         write_snapshot(rows, fetched_at)
         rec.update(ok=True, rows=len(rows))
-    except Exception as e:                       # one bad poll must never stop the collector
+    except Exception as e:  # noqa: BLE001 - one bad poll must never stop the collector
         rec["error"] = f"{type(e).__name__}: {e}"
     LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
     with open(LOG_FILE, "a", encoding="utf-8") as f:

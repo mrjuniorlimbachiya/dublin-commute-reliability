@@ -1,7 +1,8 @@
 
 from datetime import UTC, datetime
-from google.transit import gtfs_realtime_pb2
+
 import poller
+from google.transit import gtfs_realtime_pb2
 
 
 def make_feed():
