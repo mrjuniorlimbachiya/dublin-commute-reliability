@@ -3,7 +3,7 @@ import sys
 import pandas as pd
 
 sys.path.insert(0, "src")
-from commute.split import time_split  # noqa: E402
+from commute.split import time_split
 
 df = pd.read_parquet(
     "data/curated/features.parquet",
