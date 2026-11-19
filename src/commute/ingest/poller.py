@@ -18,7 +18,7 @@ RAW_DIR = Path("data/raw/trip_updates")
 LOG_FILE = Path("data/raw/poll_log.jsonl")
 STATIC_DIR = Path("data/static_gtfs/latest")
 DUBLIN_BUS_AGENCY = "1"
-MAX_STOPS = 3  # keep only the next 3 stops per trip, to limit storage
+MAX_STOPS = 10  # keep only the next 10 stops per trip, to limit storage
 INTERVAL = 60  # seconds between polls
 
 # Explicit schema: every file has identical column types, even if a column is all-null.
