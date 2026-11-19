@@ -19,6 +19,7 @@ STATIC_DIR = Path("data/static_gtfs/latest")
 DUBLIN_BUS_AGENCY = "1"
 MAX_STOPS = 10  # keep only the next 10 stops per trip, to limit storage
 INTERVAL = 60  # seconds between polls
+VEHICLE_EVERY = 2  # poll vehicles every 2nd cycle, to stay under the NTA rate limit
 
 FEEDS = {
     "trip_updates": {
@@ -202,7 +203,12 @@ if __name__ == "__main__":
     ids = load_route_ids()
     if "--once" in sys.argv:
         sys.exit(0 if poll_once(key, ids) else 1)
+    cycle = 0
     while True:
         start = time.monotonic()
-        poll_once(key, ids)
+        poll_feed("trip_updates", key, ids)
+        if cycle % VEHICLE_EVERY == 0:
+            time.sleep(30)  # keep the two requests apart
+            poll_feed("vehicles", key, ids)
+        cycle += 1
         time.sleep(max(0, INTERVAL - (time.monotonic() - start)))
